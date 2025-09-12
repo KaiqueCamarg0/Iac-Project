@@ -1,11 +1,11 @@
 # Iac-Project
 
-This project is a Infrastructure as a Code on the Azure Cloud.
+This project is Infrastructure as Code on the Azure Cloud.
 
-This Infraestrutura account with 2 Virtual Machines in start and and they are scaled according to CPU exceeds 80%
+This infrastructure account starts with two Virtual Machines, and they are automatically scaled when CPU usage exceeds 80%.
 
-These new VMs are placed in the load balance along with the others, all of this automatically because we use Azure Functions and Monitor to monitor and run the duplication script. 
+New VMs are added to the load balancer along with the others, all automatically because we use VMSS and Azure Monitor to trigger the duplication script.
 
-We also created a COSMOS DB database to store files for possible sites with forms.
+We also created an Azure Cosmos DB to store files for possible sites with forms.
 
-And entire infraestructure is created with TERRAFORM code
+The entire infrastructure is created using Terraform code.
