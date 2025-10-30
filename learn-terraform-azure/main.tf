@@ -229,7 +229,20 @@ resource "azurerm_monitor_autoscale_setting" "autoscale" {
 # ==============================
 # Máquina Virtual Única (igual ao VMSS)
 # ==============================
+# ================================
+# IP Público para o Zabbix Server
+# ================================
+resource "azurerm_public_ip" "vm_single_public_ip" {
+  name                = "pip-vm-single"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+}
 
+# ================================
+# Interface de Rede da VM Zabbix
+# ================================
 resource "azurerm_network_interface" "vm_single_nic" {
   name                = "nic-vm-single"
   location            = azurerm_resource_group.rg.location
@@ -238,7 +251,11 @@ resource "azurerm_network_interface" "vm_single_nic" {
   ip_configuration {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
-    private_ip_address_allocation = "Dynamic"
+    private_ip_address_allocation = "Static"
+    private_ip_address            = "10.0.1.10"
+
+    # 🔹 Associação do IP público
+    public_ip_address_id = azurerm_public_ip.vm_single_public_ip.id
   }
 }
 
@@ -251,13 +268,25 @@ resource "azurerm_network_security_group" "vm_single_nsg" {
   security_rule {
     name                       = "Allow-SSH-From-Specific-IP"
     priority                   = 1001
-    direction                   = "Inbound"
-    access                      = "Allow"
-    protocol                    = "Tcp"
-    source_port_range           = "*"
-    destination_port_range      = "22"
-    source_address_prefix       = "186.233.26.122"
-    destination_address_prefix  = "*"
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "186.233.26.122"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "Allow-HTTP-Zabbix"
+    priority                   = 1002
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
   }
 }
 
@@ -267,28 +296,114 @@ resource "azurerm_network_interface_security_group_association" "vm_single_assoc
 }
 
 resource "azurerm_linux_virtual_machine" "vm_single" {
-  name                = "vm-single"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  size                = "Standard_B1s"
-  admin_username      = "adminuser"                # 👈 altere o nome de usuário se quiser
-  admin_password      = "Y0ush@lln0tp@ss"           # 👈 substitua por uma senha forte e segura
-  disable_password_authentication = false          # necessário para login com senha
+  name                            = "vm-single"
+  location                        = azurerm_resource_group.rg.location
+  resource_group_name             = azurerm_resource_group.rg.name
+  size                            = "Standard_B1s"
+  admin_username                  = "adminuser"
+  admin_password                  = "Y0ush@lln0tp@ss"
+  disable_password_authentication = false
 
   network_interface_ids = [
     azurerm_network_interface.vm_single_nic.id,
   ]
 
   source_image_reference {
-    publisher = azurerm_linux_virtual_machine_scale_set.vmss.source_image_reference[0].publisher
-    offer     = azurerm_linux_virtual_machine_scale_set.vmss.source_image_reference[0].offer
-    sku       = azurerm_linux_virtual_machine_scale_set.vmss.source_image_reference[0].sku
-    version   = azurerm_linux_virtual_machine_scale_set.vmss.source_image_reference[0].version
+    publisher = "debian"
+    offer     = "debian-12"
+    sku       = "12"
+    version   = "latest"
   }
 
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "Standard_LRS"
   }
+
+  # ==========================
+  # Cloud-init (Instalação automática do Zabbix)
+  # ==========================
+  custom_data = base64encode(<<EOF
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - wget
+  - curl
+  - sudo
+  - net-tools
+  - ethtool
+  - locales
+  - postgresql
+  - apache2
+
+#cloud-config
+runcmd:
+  - |
+    #!/bin/bash
+    set -e
+
+    echo "=== Ajustando localidade ==="
+    sed -i 's/^# *pt_BR.UTF-8 UTF-8/pt_BR.UTF-8 UTF-8/' /etc/locale.gen
+    locale-gen
+    update-locale LANG=pt_BR.UTF-8
+
+    echo "=== Instalando repositório do Zabbix ==="
+    cd /tmp
+    wget https://repo.zabbix.com/zabbix/7.4/release/debian/pool/main/z/zabbix-release/zabbix-release_latest_7.4+debian12_all.deb
+    dpkg -i zabbix-release_latest_7.4+debian12_all.deb
+    apt-get update
+
+    echo "=== Instalando Zabbix e dependências ==="
+    apt-get install -y postgresql zabbix-server-pgsql zabbix-frontend-php php8.2-pgsql \
+                       zabbix-apache-conf zabbix-sql-scripts zabbix-agent
+
+    echo "=== Habilitando e iniciando PostgreSQL ==="
+    systemctl enable postgresql
+    systemctl start postgresql
+
+    echo "=== Aguardando PostgreSQL inicializar ==="
+    sleep 10
+    until sudo -u postgres psql -c "select 1;" >/dev/null 2>&1; do
+      echo "Aguardando PostgreSQL ficar pronto..."
+      sleep 5
+    done
+
+    echo "=== Criando usuário e banco Zabbix ==="
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='zabbix'" | grep -q 1 || \
+      sudo -u postgres psql -c "CREATE USER zabbix WITH PASSWORD 'senai101';"
+
+    if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw zabbix; then
+      sudo -u postgres psql -c "CREATE DATABASE zabbix OWNER zabbix;"
+      echo "=== Importando schema do banco ==="
+      zcat /usr/share/zabbix/sql-scripts/postgresql/server.sql.gz | sudo -u postgres psql zabbix
+    fi
+
+    echo "=== Ajustando permissões do banco ==="
+    sudo -u postgres psql -d zabbix -c "GRANT ALL PRIVILEGES ON DATABASE zabbix TO zabbix;"
+    sudo -u postgres psql -d zabbix -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO zabbix;"
+    sudo -u postgres psql -d zabbix -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zabbix;"
+    sudo -u postgres psql -d zabbix -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO zabbix;"
+    sudo -u postgres psql -d zabbix -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO zabbix;"
+    sudo -u postgres psql -c "ALTER DATABASE zabbix OWNER TO zabbix;"
+
+    echo "=== Configurando Zabbix ==="
+    sed -i 's/^# DBPassword=.*/DBPassword=senai101/' /etc/zabbix/zabbix_server.conf
+    chown -R zabbix:zabbix /etc/zabbix
+
+    echo "=== Habilitando e iniciando serviços ==="
+    systemctl enable zabbix-server zabbix-agent apache2
+    systemctl restart zabbix-server zabbix-agent apache2
+
+    echo "=============================================================="
+    echo "  Zabbix 7.4 instalado com sucesso no Debian 12!"
+    echo "  Acesse via navegador: http://<SEU_IP>/zabbix"
+    echo "  Login padrão: Admin / Senha: zabbix"
+    echo "=============================================================="
+
+EOF
+  )
 }
+
+
 
