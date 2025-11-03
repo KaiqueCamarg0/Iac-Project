@@ -89,6 +89,19 @@ resource "azurerm_network_security_group" "nsg" {
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
+  
+  security_rule {
+  name                        = "Allow-Grafana-3000"
+  priority                    = 1005
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "*"
+  source_port_range            = "*"
+  destination_port_range       = "3000"
+  source_address_prefix        = "*"
+  destination_address_prefix   = "0.0.0.0/0"
+  }
+
 }
 
 # Associa o NSG à Subnet
@@ -285,9 +298,22 @@ resource "azurerm_network_security_group" "vm_single_nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "80"
-    source_address_prefix      = "*"
+    source_address_prefix      = "0.0.0.0/0"
     destination_address_prefix = "*"
   }
+
+  security_rule {
+  name                       = "Allow-Grafana"
+  priority                   = 1003
+  direction                  = "Inbound"
+  access                     = "Allow"
+  protocol                   = "Tcp"
+  source_port_range          = "*"
+  destination_port_range     = "3000"
+  source_address_prefix      = "0.0.0.0/0"
+  destination_address_prefix = "*"
+  }
+
 }
 
 resource "azurerm_network_interface_security_group_association" "vm_single_assoc" {
@@ -400,7 +426,26 @@ runcmd:
     echo "  Acesse via navegador: http://<SEU_IP>/zabbix"
     echo "  Login padrão: Admin / Senha: zabbix"
     echo "=============================================================="
+    
+    sudo apt-get install -y apt-transport-https software-properties-common wget
 
+    sudo mkdir -p /etc/apt/keyrings/
+    wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg > /dev/null
+
+    echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+
+    echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com beta main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+
+    # Updates the list of available packages
+    sudo apt-get update
+
+    # Installs the latest OSS release:
+    sudo apt-get install grafana -y
+    systemctl enable grafana-server
+    systemctl start grafana-server
+
+
+    #logar (localhost:3000)
 EOF
   )
 }
